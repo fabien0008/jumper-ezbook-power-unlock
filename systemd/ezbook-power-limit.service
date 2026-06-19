@@ -1,0 +1,12 @@
+[Unit]
+Description=Raise Jumper EZbook N3450 package power limit (PL1) to 10W
+Documentation=https://github.com/fabien0008/jumper-ezbook-power-unlock
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ezbook-pl1.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
