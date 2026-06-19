@@ -1,0 +1,23 @@
+# Proof the GPU "latch" is defeated by locking the MSR PL1.
+#
+# Mechanism (confirmed against coreboot apollolake source): the PUnit enforces
+#   enforced_PL1 = min(MMIO RAPL limit @0x70A8, MSR RAPL limit 0x610)
+# FSP sets BOTH to the fused 6W TDP. Raising only the MMIO fixes CPU-only loads,
+# but when the iGPU goes active PCODE RESETS the MSR copy back to 6W -> min()=6W.
+# Writing the MSR with bit63 (LOCK) set stops PCODE from resetting it.
+#
+# --- A) continuous re-assert of MSR=10W (unlocked) during CPU+GPU load ---
+# package stays ~10W as long as we keep rewriting it each second:
+#  t  MSRpl1  GPUmhz  pkgW
+#   1  8a00    400   9.92
+#   5  8a00    400   9.98
+#  15  8a00    400   9.92
+#  30  8a00    350  10.04   (vs 5.99W with no re-assert)
+#
+# --- B) write MSR=10W WITH LOCK once, NO re-assert, CPU+GPU load ---
+#   MSR readback during load : 80008f0000dd8a00   (held; PCODE could not reset)
+#   steady-state pkg power    : 9.97 - 9.98 W
+#   GPU                       : ~383-400 MHz (active)
+#   CPU                       : ~1.57 GHz
+#
+# Before any fix the same combined load sat at 5.99 W / CPU 1.2 GHz / GPU 200 MHz.

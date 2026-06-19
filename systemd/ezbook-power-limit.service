@@ -5,6 +5,7 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
+ExecStartPre=-/sbin/modprobe msr
 ExecStart=/usr/local/sbin/ezbook-pl1.py
 RemainAfterExit=yes
 

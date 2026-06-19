@@ -7,17 +7,23 @@ finally explained why the unlock helps CPU-bound work but **not** anything that
 touches the GPU.
 
 > **TL;DR**
-> - **What works:** writing the MMIO `PACKAGE_RAPL_LIMIT` register at
->   `MCHBAR(0xFED10000) + 0x70A8`. Sets PL1 to 10 W. Verified: 4-core load went
->   **5.97 W → 10.12 W**, all-core clock **1.5 GHz → 2.09 GHz**, temp 62 → 76 °C
->   (TjMax is 105 °C, so it is policy-limited, not thermal).
-> - **What does NOT work:** MSR `0x610` (write sticks but PCODE ignores it), the
->   classic Core MMIO offset `0x59A0`, config-TDP MSRs (`#GP`), the BIOS
->   "Turbo-XE TDP Limit" NVAR byte (set it, rebooted, no effect).
-> - **The catch:** the moment the **iGPU does any work**, the PUNIT latches the
->   whole package back to ~6 W and our register is overridden. So the unlock is a
->   **CPU-only win** (compiles, encodes, batch jobs with the screen idle). Browsing
->   in Chrome — which keeps the GPU busy — mostly stays at 6 W.
+> - **The PUnit enforces `PL1 = min(MMIO RAPL limit @0x70A8, MSR RAPL limit 0x610)`.**
+>   The FSP sets *both* to the fused 6 W TDP. To raise the limit you must raise
+>   **both**, and the MSR must be **locked**.
+> - **The fix (two writes at boot):**
+>   1. MMIO `MCHBAR(0xFED10000)+0x70A8` := `0x00008f0000dd8a00` (PL1 10 W / PL2 15 W)
+>   2. MSR `0x610` := `0x80008f0000dd8a00` (same **+ bit63 LOCK**)
+> - **Result — works in ALL workloads, GPU included:** CPU-only load
+>   **5.97 W → 10.12 W** (1.5 → 2.09 GHz); combined CPU+GPU load **5.99 W → 9.98 W**
+>   (GPU stays active). Temps ≤ 76 °C vs TjMax 105 °C — policy-limited, not thermal.
+> - **Why the lock matters:** raising only the MMIO fixes CPU-only loads, but the
+>   instant the iGPU goes active PCODE **resets the MSR copy back to 6 W**, so
+>   `min()` falls to 6 W (the "GPU latch"). Locking the MSR (bit 63) stops PCODE
+>   from resetting it, so `min(10 W, 10 W)` holds even with the GPU busy.
+> - **What does NOT work:** MSR `0x610` *alone* (PCODE keeps it at 6 W via the
+>   `min()` with the MMIO, and resets it on GT activity), the classic Core MMIO
+>   offset `0x59A0`, config-TDP MSRs (`#GP`), the BIOS "Turbo-XE TDP Limit" NVAR
+>   byte (set it, rebooted, no effect).
 
 ---
 
@@ -209,6 +215,54 @@ compositing desktop under real use) keeps waking the GPU, **interactive/browser
 use mostly stays at 6 W.** The 10 W win is real for **CPU-bound work with the GPU
 genuinely idle**: compiling, video *encoding* (not decoding), compression, batch
 processing — ideally on a static screen or over SSH/console.
+
+> *(At this point we again concluded the GPU case was unfixable at runtime. As in
+> Act 6, that conclusion was premature — see Act 12.)*
+
+### Act 12 — The breakthrough: `min(MMIO, MSR)` and the MSR lock bit.
+
+Pushed to look harder, we read the **coreboot Apollo Lake** source. Its commit
+"Update PL1 value in RAPL MMIO register" states it exactly:
+
+> *"This RAPL MMIO register is a physically separate instance from RAPL MSR
+> register. The Punit algorithm constrains performance to whichever power limit
+> is **lower** between both registers."* — and *"FSP code sets the PL1 value as
+> 6 W in RAPL MMIO register based on fused soc tdp value."*
+
+So enforcement is **`PL1 = min(MMIO @0x70A8, MSR 0x610)`**. That retro-explains
+everything. We then re-read the MSR during a GPU load — something we'd never done
+(we only ever re-checked the *MMIO*):
+
+```
+before load:  MSR 0x610 = 0x...8600   (6 W !!)   MMIO = 0x...8a00 (10 W)
+during  load: MSR 0x610 = 0x...8600   (6 W)      MMIO = 0x...8a00 (10 W)
+```
+
+**The MSR had been reset to 6 W.** The "GPU latch" from Act 11 was never a locked
+register — it was **PCODE resetting the MSR copy to 6 W on GT activity**, and
+`min(10 W MMIO, 6 W MSR) = 6 W`. Proof: continuously re-writing the MSR to 10 W
+each second during a combined load held the package at **~10 W**
+(`data/combined-load-locked-msr.txt`).
+
+The clean fix is the MSR **lock bit (63)**: write the MSR to 10 W *with* bit 63
+set, and PCODE can no longer reset it.
+
+```
+MSR 0x610 := 0x80008f0000dd8a00     # PL1 10 W, PL2 15 W, LOCK
+```
+
+Combined CPU+GPU load, **no daemon, no re-assert**:
+
+```
+MSR readback during load : 0x80008f0000dd8a00   (held)
+steady-state package      : 9.98 W   (was 5.99 W)
+GPU                       : ~383 MHz (active)
+CPU                       : ~1.57 GHz
+```
+
+**The unlock now applies in every workload, GPU included.** The persistent
+solution writes both registers at boot (MMIO unlocked 10 W, which holds on its
+own; MSR locked 10 W).
 
 ---
 
