@@ -40,6 +40,12 @@ GPU/game and mixed loads gain the most (the locked-MSR fix at work); CPU-only wo
 saturates ~8–9W because the all-core clock is ratio-capped. Peak temp 84 °C vs
 TjMax 105 °C.
 
+![Performance vs power limit, 6→15W](assets/perf_vs_power.png)
+
+The full 6→15W sweep ([BENCHMARKS.md](BENCHMARKS.md)) shows 10W captures essentially
+all the usable gain: CPU is ratio-capped, the game is maxed, and 15W even backfires
+on mixed loads — which is why the daily config locks PL1 at 10W.
+
 ![OpenArena benchmark — following a bot through combat](assets/openarena-frag.png)
 
 ---

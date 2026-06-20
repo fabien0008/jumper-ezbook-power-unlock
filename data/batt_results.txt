@@ -1,0 +1,4 @@
+idle | system(battery)=3.80W
+load @ 6W cap | system(battery)=3.80W | RAPL_package=5.99W
+load @ 10W cap | system(battery)=3.80W | RAPL_package=9.99W
+=== BATT DONE ===

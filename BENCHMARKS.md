@@ -19,6 +19,8 @@ The biggest wins are **GPU/game and mixed CPU+GPU** workloads — exactly the ca
 that used to be strangled at 6W and which the MSR-lock fix unlocked (see the GPU
 latch story in the main README, Act 12).
 
+![6W to 10W performance gain per benchmark](assets/before_after.png)
+
 ## What's being benchmarked
 
 The game test is an OpenArena *follow-bot* timedemo — the camera rides the AI
@@ -81,6 +83,8 @@ power-policy-limited, not thermal.)
 
 ### Beyond 10W: diminishing — then negative — returns (why 10W is the daily setting)
 
+![Performance vs power limit, normalized to 6W](assets/perf_vs_power.png)
+
 The phase-2 sweep to 12W and 15W shows 10W is the right place to stop:
 
 - **CPU-only: flat.** 7-zip and x264 don't move from 10→15W — the all-core ratio
@@ -102,6 +106,16 @@ The phase-2 sweep to 12W and 15W shows 10W is the right place to stop:
 game maxed) at the lowest temps, which is why the persistent config locks PL1 at
 10W rather than higher.
 
+### Did the higher caps actually engage? (measured power)
+
+![Measured package power drawn at each PL1 setting](assets/power_drawn.png)
+
+Yes. The GPU and mixed lines climb past 10W to ~12.7–13.4W — impossible under a
+10W ceiling — confirming 12/15W took effect. CPU-only stays pinned at ~8–9W (it's
+ratio-limited, not power-limited), and measured power bends *below* the y=x line
+past ~12W because nothing on this SoC demands a full 15W. (Power is RAPL; see the
+measurement caveats below.)
+
 ## Method / reproducibility
 
 - A/B done live without rebooting: the MSR is locked at 10 W, and the PUnit
@@ -110,8 +124,18 @@ game maxed) at the lowest temps, which is why the persistent config locks PL1 at
   `scripts/benchsuite.sh` runs the five benchmarks at the current level.
 - **Cooldown** between every benchmark: idle until package temp returns to ≤55 °C
   (idle floor ~52 °C) so each run starts from the same thermal baseline.
-- Power = RAPL energy-counter delta over the run wall-time; clocks/temp sampled at
-  2 Hz; peak temp reported.
+- Power = **RAPL** package energy-counter delta over the run wall-time; clocks/temp
+  sampled at 2 Hz; peak temp reported. RAPL is the CPU's own model-based estimate
+  of *package* power (cores + uncore + iGPU), not an external meter and not wall
+  power. It's trustworthy here: at a 6W cap it read 5.99W and at a 10W cap 9.99W
+  (matching the programmed PL1 to 0.01W), and because PL2 was held constant (15W)
+  across all settings, the rising averages at 12/15W isolate the PL1 change.
+- **Independent cross-check attempted and failed:** the battery fuel gauge reports
+  static placeholder values on this machine (`ENERGY_NOW == ENERGY_FULL` frozen at
+  100%, `POWER_NOW` nailed at 3.8W regardless of load, model "SR Real Battery",
+  serial 123456789 — see [`data/batt_results.txt`](data/batt_results.txt)). So no
+  software measurement other than RAPL is possible here; a true physical reading
+  would need an external inline DC power meter.
 - **OpenArena**: a recorded *follow-bot* demo (camera rides the AI through real
   combat — [`data/openarena-benchdemo.dm_71`](data/openarena-benchdemo.dm_71)),
   replayed with `timedemo 1`. Launched with `+set com_crashed 0` so the
