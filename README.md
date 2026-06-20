@@ -268,24 +268,30 @@ own; MSR locked 10 W).
 
 ## Final verdict
 
-| Lever | Writable? | Enforced? | Verdict |
+The PUnit enforces `PL1 = min(MMIO @0x70A8, MSR 0x610)`, so **both** must be raised.
+
+| Lever | Writable? | Role | Verdict |
 |---|---|---|---|
-| MSR `0x610` PL1 | yes | no (PCODE overrides) | dead |
-| MMIO `0x59A0` (Core offset) | n/a | n/a | wrong offset on Goldmont |
-| **MMIO `0x70A8` (package limit)** | **yes** | **yes, GPU idle only** | **WORKS (CPU-only)** |
-| MMIO `0x7870` (GT-active ~6 W) | no (read-only) | yes, GPU active | locked |
-| MMIO `0x70A0` (SoC TDP 6 W) | no (read-only) | — | locked |
+| **MMIO `0x70A8` (package limit)** | **yes** | one half of the `min()` | **REQUIRED — raise to 10 W** |
+| **MSR `0x610` PL1 + LOCK (bit63)** | **yes** | other half; PCODE resets it to 6 W on GT activity unless locked | **REQUIRED — raise to 10 W, locked** |
+| MMIO `0x59A0` (Core offset) | n/a | — | wrong offset on Goldmont (dead end) |
+| MMIO `0x7870` / `0x70A0` (read-outs we mis-read as the GT limit) | no | status/TDP read-outs | red herring — the GT-active 6 W came from the MSR reset, not these |
 | config-TDP `0x648-0x64C` | — | — | `#GP`, unimplemented |
 | PP0/PP1 limit MSRs `0x638/0x640` | — | — | `#GP`, don't exist |
-| BIOS NVAR "TDP Limit" `0xEC` | yes (flash) | no | not plumbed (dead knob) |
+| BIOS NVAR "TDP Limit" `0xEC` | yes (flash) | — | not plumbed (dead knob) |
+
+**Both registers raised + MSR locked ⇒ 10 W in every workload (CPU-only and GPU/mixed).**
 
 ## Register map (MCHBAR base `0xFED10000`)
 
 | Offset | Meaning | Notes |
 |--------|---------|-------|
-| `+0x70A0` | PKG_POWER_INFO (TDP) | 6 W, read-only |
-| `+0x70A8` | **PACKAGE_RAPL_LIMIT** | the writable lever; `0x00008f0000dd8a00` = PL1 10 W / PL2 15 W |
-| `+0x7870` | GT-active package ceiling | ~6 W, read-only |
+| `+0x70A0` | PKG_POWER_INFO (TDP) | 6 W, read-only (read-out, not a lever) |
+| `+0x70A8` | **PACKAGE_RAPL_LIMIT (MMIO)** | writable; `0x00008f0000dd8a00` = PL1 10 W / PL2 15 W |
+| `+0x7870` | RAPL-shaped read-out (~6 W) | read-only; a red herring, not the GT limit |
+
+Plus MSR `0x610` (`PKG_POWER_LIMIT`): same qword layout, must be written with
+**bit 63 (lock)** set so PCODE can't reset it on GT activity.
 
 RAPL limit qword layout: bits `[14:0]` PL1 power (× 1/256 W), bit `15` PL1 enable,
 bit `16` clamp, bits `[23:17]` time window, bits `[46:32]` PL2, bit `47` PL2
@@ -298,10 +304,14 @@ enable, bit `63` lock.
 Everything needs root (reads/writes `/dev/mem` and MSRs).
 
 ```bash
+# apply the full fix now (both registers; volatile, lost on reboot)
+sudo ./scripts/ezbook-pl1.py
+#   -> MMIO 0x70A8 = 10 W  AND  MSR 0x610 = 10 W + lock
+
 # show current MMIO package limit
 sudo ./scripts/mmio_rapl.py
 
-# set PL1 = 10 W now (volatile, lost on reboot)
+# set only the MMIO half (CPU-only boost; GPU loads will still latch to 6 W)
 sudo ./scripts/mmio_rapl.py 0x00008f0000dd8a00
 
 # re-find the register on a different board / firmware
@@ -321,50 +331,34 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ezbook-power-limit.service
 ```
 
-`ezbook-pl1.py` is self-contained (no deps) and re-applies PL1 = 10 W on every
-boot. Confirm with `systemctl status ezbook-power-limit.service`.
+`ezbook-pl1.py` is self-contained (no deps) and re-applies the full fix (MMIO
+10 W + MSR 10 W locked) on every boot. Confirm with
+`systemctl status ezbook-power-limit.service`.
 
 ---
 
-## Getting a real boost when the GPU IS active — honest options
+## The GPU case — SOLVED
 
-You asked how to defeat the GPU→6 W fallback so the boost applies in *all* cases.
-The blunt truth from the investigation: **at runtime, you can't.** The GT-active
-ceiling is the SoC TDP held in read-only registers and enforced by PCODE. Here is
-the honest menu, easiest → hardest:
+Earlier drafts of this README said the GPU→6 W fallback was unfixable at runtime.
+**That was wrong** (Act 12). It is fixed: locking the MSR (`0x610` with bit 63)
+stops PCODE from resetting it on GT activity, so `min(MMIO, MSR)` stays at 10 W
+with the GPU active. `ezbook-pl1.py` / the systemd unit do this for you, and the
+boost now applies to Chrome, video, games and any mixed CPU+GPU load.
 
-1. **Keep the GPU asleep for CPU-bound tasks (the practical lever you control).**
-   The package stays at 10 W *only* while the iGPU is in RC6. So for jobs where
-   CPU matters more than GPU, prevent needless GPU wake-ups:
-   - Run the job from a **TTY/SSH with no X/Wayland session** (nothing composites).
-   - In Chrome, disable GPU: `--disable-gpu --disable-gpu-compositing` (software
-     compositing keeps the iGPU idle; the CPU now has the full 10 W). Trade-off:
-     you lose hardware video *decode*, so this is good for CPU-heavy browsing,
-     bad for video playback.
-   - Use a non-compositing window manager for CPU-bound sessions.
-   This doesn't raise the GPU-active ceiling — it keeps more of your workload in
-   the 10 W regime by not triggering the policy.
+Note this raises the *shared* package budget to 10 W; under a combined load the
+CPU and GPU split that 10 W (e.g. CPU ~1.57 GHz + GPU ~383 MHz instead of being
+strangled at 6 W). It does **not** raise the per-domain ceilings: all-core CPU is
+still capped at the 2.1 GHz ratio, and the GPU at 700 MHz — but neither is
+power-starved any more.
 
-2. **Cap the GPU frequency (mitigation, not a boost).** Under combined load,
-   `echo 300 | sudo tee /sys/class/drm/card1/gt_max_freq_mhz` gives the CPU more
-   of the shared 6 W. Total stays 6 W — you're just reallocating it. Only worth it
-   if your workload is CPU-bound but unavoidably wakes the GPU.
+### If you want to push *past* 10 W
 
-3. **The only real fix: change the SoC TDP in firmware (high effort, real brick
-   risk, may be impossible).** The 6 W GT-active budget is set at boot by the FSP
-   silicon-init / PCODE. To raise it you'd have to patch the **FSP-S power-limit
-   UPD default** (or the PCODE PL config) in the BIOS image and reflash via the
-   SPI method. Caveats:
-   - If the value lives in **PCODE/microcode** (signed), it is **not patchable** —
-     and given Apollo Lake's history this is the likely case.
-   - If it lives in an **FSP-S UPD** (unsigned), it is patchable. We already have
-     the toolchain (`bios.bin` dump, SPI `/dev/mtd0` write path, UEFITool /
-     IFRExtractor) from the NVAR work. This is the open research path; it is the
-     same FSP-locked territory that defeated the DVMT setting, so temper
-     expectations.
-
-If you only ever do CPU-bound batch work (compiles, transcodes, compression) with
-the screen idle, you already have the full win and don't need any of this.
+10 W already saturates the all-core CPU ratio, so more only helps if a workload
+genuinely wants CPU+GPU simultaneously above 10 W. You can raise the target in
+`ezbook-pl1.py` (e.g. PL1 = 12 W is raw `0xC00` → MMIO `0x00008f0000dd8c00`, MSR
+`0x80008f0000dd8c00`). Watch temps (`MSR 0x19C`, thermal zones) — we measured
+76 °C at 10 W with TjMax 105 °C, so there is headroom, but this chassis is small.
+The hard ceiling is PL2 (15 W) and the silicon's own VR current limit.
 
 ---
 
@@ -379,13 +373,15 @@ the screen idle, you already have the full win and don't need any of this.
 | `nvar.py` | read/write the AMI `Setup` NVAR variable in SPI flash (from prior work) |
 | `peek.py` | print selected NVAR Setup offsets (EIST/Turbo/TDC/TDP) |
 | `gputest.sh` | steady-state combined CPU+GPU load benchmark (samples after PL2 window) |
-| `ezbook-pl1.py` | self-contained boot-time applier (used by the systemd unit) |
+| `snapdiff.py` | snapshot/diff MCHBAR idle vs GPU-active (used to chase the GT-active clamp) |
+| `ezbook-pl1.py` | self-contained boot-time applier: MMIO 10 W + MSR 10 W locked (used by the systemd unit) |
 
 ## Safety notes
 
 - All runtime writes here are **volatile** — a reboot restores the factory 6 W.
-  Nothing here modifies flash except `nvar.py` (and we established the NVAR power
-  knob does nothing anyway).
+  The MSR lock bit (bit 63) also clears on reboot, so the systemd unit re-applies
+  it every boot. Nothing here modifies flash except `nvar.py` (and we established
+  the NVAR power knob does nothing anyway).
 - TjMax is 105 °C and we measured ≤76 °C at 10 W sustained, so thermals are not a
   concern at this limit on this chassis. If you push a hotter chip/chassis, watch
   `THERM_STATUS` (`MSR 0x19C`) and the thermal zones.
