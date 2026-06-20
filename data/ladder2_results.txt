@@ -1,0 +1,19 @@
+=== set PL1=10W (0x00008f0000dd8a00) + MSR re-assert; settling 8s ===
+RESULT|10W|cpu-7zip|MIPS=5857|pkg=9.19W|cpu=2086MHz|gpu=156MHz|tmax=74C|dur=69.8s
+RESULT|10W|cpu-x264|fps=25.7|pkg=7.71W|cpu=2087MHz|gpu=100MHz|tmax=74C|dur=70.0s
+RESULT|10W|gpu-glmark2|score=311|pkg=10.97W|cpu=1969MHz|gpu=610MHz|tmax=73C|dur=61.1s
+RESULT|10W|game-openarena|fps=110.9|pkg=10.88W|cpu=2060MHz|gpu=520MHz|tmax=83C|dur=25.2s
+RESULT|10W|combined-x264+glxgears|encfps=19.0(glxgears=258.896)|pkg=11.03W|cpu=1647MHz|gpu=429MHz|tmax=83C|dur=63.3s
+=== set PL1=12W (0x00008f0000dd8c00) + MSR re-assert; settling 8s ===
+RESULT|12W|cpu-7zip|MIPS=6675|pkg=9.04W|cpu=2088MHz|gpu=100MHz|tmax=78C|dur=61.9s
+RESULT|12W|cpu-x264|fps=26.1|pkg=7.77W|cpu=2089MHz|gpu=100MHz|tmax=76C|dur=69.1s
+RESULT|12W|gpu-glmark2|score=333|pkg=12.31W|cpu=2041MHz|gpu=682MHz|tmax=81C|dur=61.0s
+RESULT|12W|game-openarena|fps=111.4|pkg=11.09W|cpu=2052MHz|gpu=548MHz|tmax=85C|dur=24.2s
+RESULT|12W|combined-x264+glxgears|encfps=18.7(glxgears=290.519)|pkg=12.59W|cpu=1703MHz|gpu=467MHz|tmax=86C|dur=64.1s
+=== set PL1=15W (0x00008f0000dd8f00) + MSR re-assert; settling 8s ===
+RESULT|15W|cpu-7zip|MIPS=6358|pkg=8.88W|cpu=2088MHz|gpu=100MHz|tmax=79C|dur=64.9s
+RESULT|15W|cpu-x264|fps=25.6|pkg=7.87W|cpu=2089MHz|gpu=100MHz|tmax=78C|dur=70.3s
+RESULT|15W|gpu-glmark2|score=330|pkg=12.66W|cpu=2051MHz|gpu=686MHz|tmax=83C|dur=61.1s
+RESULT|15W|game-openarena|fps=110.5|pkg=11.18W|cpu=2048MHz|gpu=520MHz|tmax=86C|dur=24.2s
+RESULT|15W|combined-x264+glxgears|encfps=11.7(glxgears=374.295)|pkg=13.38W|cpu=1117MHz|gpu=664MHz|tmax=87C|dur=102.8s
+=== LADDER2 DONE ===

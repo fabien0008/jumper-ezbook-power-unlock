@@ -37,14 +37,20 @@ The GPU test is glmark2 (the refract scene shown here):
 Raw data: [`data/ladder_results.txt`](data/ladder_results.txt). `pkg` = average
 package power over the run, `cpu`/`gpu` = average clocks, `tmax` = peak temp.
 
-| Benchmark | metric | 6W | 8W | 10W |
-|-----------|--------|---:|---:|----:|
-| 7-zip | MIPS | 4858 | 6259 | 6383 |
-| x264 encode | fps | 22.6 | 25.6 | 25.6 |
-| glmark2 | score | 205 | 263 | 310 |
-| OpenArena | fps | 69.1 | 95.2 | 111.0 |
-| combined x264 | enc fps | 15.3 | 17.1 | 18.5 |
-| combined glxgears | fps | 134 | 207 | 257 |
+| Benchmark | metric | 6W | 8W | 10W | 12W | 15W |
+|-----------|--------|---:|---:|----:|----:|----:|
+| 7-zip | MIPS | 4858 | 6259 | 6383 | 6675 | 6358 |
+| x264 encode | fps | 22.6 | 25.6 | 25.6 | 26.1 | 25.6 |
+| glmark2 | score | 205 | 263 | 310 | 333 | 330 |
+| OpenArena | fps | 69.1 | 95.2 | 111.0 | 111.4 | 110.5 |
+| combined x264 | enc fps | 15.3 | 17.1 | 18.5 | 18.7 | **11.7** |
+| combined glxgears | fps | 134 | 207 | 257 | 290 | 374 |
+
+6/8/10W measured with the MSR locked at 10W (phase-1, `data/ladder_results.txt`).
+12/15W needed the MSR unlocked (reboot + boot service off) with a re-assert daemon
+holding it — phase-2, `data/ladder2_results.txt`. The 10W column was re-measured in
+phase-2 as a cross-check and matched (glmark2 311 vs 310, OpenArena 110.9 vs 111.0,
+combined glxgears 259 vs 257), validating the unlocked+re-assert method.
 
 Measured package power / peak temp at each level (representative):
 
@@ -73,6 +79,29 @@ power-policy-limited, not thermal.)
   improved +21% — at 6 W the two starve each other down to a shared ~6 W; at 10 W
   they share a 10 W budget.
 
+### Beyond 10W: diminishing — then negative — returns (why 10W is the daily setting)
+
+The phase-2 sweep to 12W and 15W shows 10W is the right place to stop:
+
+- **CPU-only: flat.** 7-zip and x264 don't move from 10→15W — the all-core ratio
+  ceiling (2.0–2.09 GHz) is the bottleneck, not power, and they never draw more
+  than ~9 W anyway.
+- **GPU/game: marginal then plateaued.** glmark2 gains only +7% at 12W (310→333)
+  and nothing at 15W (330). OpenArena is already maxed at 10W (111 fps across
+  10/12/15W).
+- **Mixed: 15W actually backfires.** At 15W the uncapped GPU (glxgears, vsync off)
+  grabbed the larger share of the bigger budget — glxgears shot to 374 fps — and
+  *starved* the simultaneous CPU encode down to **11.7 fps** (CPU 1117 MHz) from
+  18.7 at 12W. With no per-domain (PP0/PP1) limits on this SoC, a higher package
+  budget lets whichever side is hungrier dominate; a real game (vsync-capped GPU)
+  wouldn't trip this, but it shows more power isn't strictly better for mixed work.
+- **Heat for nothing.** Peak temp rose 84 → 87 °C from 10 → 15W for ≤7% gain on
+  one benchmark.
+
+**Conclusion: 10W captures essentially all the usable benefit** (CPU ratio-capped,
+game maxed) at the lowest temps, which is why the persistent config locks PL1 at
+10W rather than higher.
+
 ## Method / reproducibility
 
 - A/B done live without rebooting: the MSR is locked at 10 W, and the PUnit
@@ -87,6 +116,8 @@ power-policy-limited, not thermal.)
   combat — [`data/openarena-benchdemo.dm_71`](data/openarena-benchdemo.dm_71)),
   replayed with `timedemo 1`. Launched with `+set com_crashed 0` so the
   "safe video settings?" prompt never appears — fully unattended.
-- 12 W and 15 W are not shown: the MSR is locked at 10 W for daily use, which caps
-  the ladder there. Testing higher needs a reboot (the lock clears on reboot) with
-  the boot service temporarily disabled.
+- 12 W and 15 W (phase-2) required the MSR *unlocked* — the lock clears only on
+  reboot, so we disabled the boot service, rebooted, and ran `scripts/runladder2.sh`,
+  which sets MMIO+MSR per level and runs `scripts/reassert_msr.py` (rewrites the
+  unlocked MSR every 0.8 s so GPU activity can't reset it). The daily 10 W lock was
+  re-enabled afterward.

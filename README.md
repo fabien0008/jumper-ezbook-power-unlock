@@ -368,14 +368,15 @@ strangled at 6 W). It does **not** raise the per-domain ceilings: all-core CPU i
 still capped at the 2.1 GHz ratio, and the GPU at 700 MHz — but neither is
 power-starved any more.
 
-### If you want to push *past* 10 W
+### Why not push *past* 10 W?
 
-10 W already saturates the all-core CPU ratio, so more only helps if a workload
-genuinely wants CPU+GPU simultaneously above 10 W. You can raise the target in
-`ezbook-pl1.py` (e.g. PL1 = 12 W is raw `0xC00` → MMIO `0x00008f0000dd8c00`, MSR
-`0x80008f0000dd8c00`). Watch temps (`MSR 0x19C`, thermal zones) — we measured
-76 °C at 10 W with TjMax 105 °C, so there is headroom, but this chassis is small.
-The hard ceiling is PL2 (15 W) and the silicon's own VR current limit.
+We measured it (see [BENCHMARKS.md](BENCHMARKS.md), phase-2): **12 W and 15 W buy
+essentially nothing and 15 W can hurt.** CPU-only is flat (ratio-capped), glmark2
+gains only +7% at 12 W then plateaus, OpenArena is maxed at 10 W, and at 15 W the
+uncapped GPU starves the CPU in mixed loads — all while running hotter (87 °C).
+10 W captures the usable benefit at the lowest temps, so that's the daily setting.
+If you still want to experiment, raise the target in `ezbook-pl1.py` (PL1 = 12 W is
+raw `0xC00` → MMIO `0x00008f0000dd8c00`, MSR `0x80008f0000dd8c00`).
 
 ---
 
