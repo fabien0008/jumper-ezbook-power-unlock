@@ -25,6 +25,21 @@ touches the GPU.
 >   offset `0x59A0`, config-TDP MSRs (`#GP`), the BIOS "Turbo-XE TDP Limit" NVAR
 >   byte (set it, rebooted, no effect).
 
+## Real-world benchmarks (6W stock → 10W unlocked)
+
+Full results and method in [BENCHMARKS.md](BENCHMARKS.md). Highlights:
+
+| Workload | 6W (stock) | 10W (unlocked) | Gain |
+|----------|-----------:|---------------:|:----:|
+| OpenArena (game fps) | 69.1 | **111.0** | **+61%** |
+| glmark2 (GPU score) | 205 | **310** | **+51%** |
+| 7-zip (CPU MIPS) | 4858 | **6383** | **+31%** |
+| CPU+GPU mixed (glxgears fps) | 134 | **257** | **+91%** |
+
+GPU/game and mixed loads gain the most (the locked-MSR fix at work); CPU-only work
+saturates ~8–9W because the all-core clock is ratio-capped. Peak temp 84 °C vs
+TjMax 105 °C.
+
 ---
 
 ## The machine
