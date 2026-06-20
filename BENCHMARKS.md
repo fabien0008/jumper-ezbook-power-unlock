@@ -19,6 +19,19 @@ The biggest wins are **GPU/game and mixed CPU+GPU** workloads — exactly the ca
 that used to be strangled at 6W and which the MSR-lock fix unlocked (see the GPU
 latch story in the main README, Act 12).
 
+## What's being benchmarked
+
+The game test is an OpenArena *follow-bot* timedemo — the camera rides the AI
+through real combat (note "following Grunt" / the frag messages), so it's
+representative gameplay, not a static scene:
+
+![OpenArena gameplay — following a bot through combat](assets/openarena-frag.png)
+![OpenArena gameplay — following Grunt](assets/openarena-following-grunt.png)
+
+The GPU test is glmark2 (the refract scene shown here):
+
+![glmark2 refract scene](assets/glmark2.png)
+
 ## Full watt ladder
 
 Raw data: [`data/ladder_results.txt`](data/ladder_results.txt). `pkg` = average

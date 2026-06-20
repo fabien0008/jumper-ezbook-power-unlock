@@ -40,6 +40,8 @@ GPU/game and mixed loads gain the most (the locked-MSR fix at work); CPU-only wo
 saturates ~8–9W because the all-core clock is ratio-capped. Peak temp 84 °C vs
 TjMax 105 °C.
 
+![OpenArena benchmark — following a bot through combat](assets/openarena-frag.png)
+
 ---
 
 ## The machine
