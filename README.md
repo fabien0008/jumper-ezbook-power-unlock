@@ -1,117 +1,113 @@
-# Unlocking the 6 W power limit on a Jumper EZbook (Celeron N3450 / Apollo Lake)
+# Squeezing 10 watts out of a 6-watt netbook (Celeron N3450 / Apollo Lake)
 
-The full, unedited story of how we raised the **sustained package power limit (PL1)**
-on a cheap Jumper EZbook netbook from its factory **6 W** to **10 W** — including
-every wrong turn, dead end, premature wrong conclusion, and the experiments that
-finally explained why the unlock helps CPU-bound work but **not** anything that
-touches the GPU.
+I own a Jumper EZbook. It cost about as much as a fancy dinner, it has a Celeron
+N3450, 6 GB of RAM, and the ambition of a tired snail. Under any sustained load
+its four cores sag down to ~1.5 GHz and stay there, because Intel decided this
+chip lives on a **6 watt** diet and the firmware enforces it with religious zeal.
 
-> **TL;DR**
-> - **The PUnit enforces `PL1 = min(MMIO RAPL limit @0x70A8, MSR RAPL limit 0x610)`.**
->   The FSP sets *both* to the fused 6 W TDP. To raise the limit you must raise
->   **both**, and the MSR must be **locked**.
-> - **The fix (two writes at boot):**
->   1. MMIO `MCHBAR(0xFED10000)+0x70A8` := `0x00008f0000dd8a00` (PL1 10 W / PL2 15 W)
->   2. MSR `0x610` := `0x80008f0000dd8a00` (same **+ bit63 LOCK**)
-> - **Result — works in ALL workloads, GPU included:** CPU-only load
->   **5.97 W → 10.12 W** (1.5 → 2.09 GHz); combined CPU+GPU load **5.99 W → 9.98 W**
->   (GPU stays active). Temps ≤ 76 °C vs TjMax 105 °C — policy-limited, not thermal.
-> - **Why the lock matters:** raising only the MMIO fixes CPU-only loads, but the
->   instant the iGPU goes active PCODE **resets the MSR copy back to 6 W**, so
->   `min()` falls to 6 W (the "GPU latch"). Locking the MSR (bit 63) stops PCODE
->   from resetting it, so `min(10 W, 10 W)` holds even with the GPU busy.
-> - **What does NOT work:** MSR `0x610` *alone* (PCODE keeps it at 6 W via the
->   `min()` with the MMIO, and resets it on GT activity), the classic Core MMIO
->   offset `0x59A0`, config-TDP MSRs (`#GP`), the BIOS "Turbo-XE TDP Limit" NVAR
->   byte (set it, rebooted, no effect).
+This is the story of how I doubled that budget to **10 W** — and, more
+interestingly, of all the walls I ran into face-first along the way. Because the
+honest version of a hardware-hacking afternoon is not "I found the register." It
+is "I found the wrong register, declared victory, declared defeat, declared
+victory again, and only *then* found the right one." Buckle up, dear reader.
 
-## Real-world benchmarks (6W stock → 10W unlocked)
+> **TL;DR for the impatient**
+> - The PUnit enforces `PL1 = min(MMIO RAPL limit @0x70A8, MSR RAPL limit 0x610)`.
+>   The firmware nails *both* to the fused 6 W TDP. You must raise **both**, and
+>   the MSR one must be **locked**, or the GPU will quietly undo your work.
+> - **The whole fix is two register writes at boot:**
+>   1. MMIO `MCHBAR(0xFED10000)+0x70A8` := `0x00008f0000dd8a00`  (PL1 10 W / PL2 15 W)
+>   2. MSR `0x610` := `0x80008f0000dd8a00`  (same, **+ bit 63 = LOCK**)
+> - It works in **every** workload, GPU included: CPU-only **5.97 → 10.12 W**
+>   (1.5 → 2.09 GHz), combined CPU+GPU **5.99 → 9.98 W**. Peak temp 84 °C against a
+>   105 °C limit — this was never about heat, only policy.
 
-Full results and method in [BENCHMARKS.md](BENCHMARKS.md). Highlights:
+## Show me the numbers
 
-| Workload | 6W (stock) | 10W (unlocked) | Gain |
+Real workloads, stock 6 W vs unlocked 10 W (full method and the 6→15 W sweep in
+[BENCHMARKS.md](BENCHMARKS.md)):
+
+| Workload | 6 W (stock) | 10 W (unlocked) | Gain |
 |----------|-----------:|---------------:|:----:|
-| OpenArena (game fps) | 69.1 | **111.0** | **+61%** |
-| glmark2 (GPU score) | 205 | **310** | **+51%** |
-| 7-zip (CPU MIPS) | 4858 | **6383** | **+31%** |
-| CPU+GPU mixed (glxgears fps) | 134 | **257** | **+91%** |
-
-GPU/game and mixed loads gain the most (the locked-MSR fix at work); CPU-only work
-saturates ~8–9W because the all-core clock is ratio-capped. Peak temp 84 °C vs
-TjMax 105 °C.
+| OpenArena (game fps) | 69.1 | **111.0** | **+61 %** |
+| glmark2 (GPU score) | 205 | **310** | **+51 %** |
+| 7-zip (CPU MIPS) | 4858 | **6383** | **+31 %** |
+| CPU+GPU mixed (glxgears fps) | 134 | **257** | **+91 %** |
 
 ![Performance vs power limit, 6→15W](assets/perf_vs_power.png)
 
-The full 6→15W sweep ([BENCHMARKS.md](BENCHMARKS.md)) shows 10W captures essentially
-all the usable gain: CPU is ratio-capped, the game is maxed, and 15W even backfires
-on mixed loads — which is why the daily config locks PL1 at 10W.
+The games and the mixed loads are the big winners. The pure-CPU stuff tops out
+around 8–9 W because the all-core clock hits a hard ratio ceiling long before it
+runs out of watts — which is exactly why 10 W, and not more, is the sweet spot.
+Push to 15 W and you gain almost nothing and can even *lose* (more on that crime
+later).
 
-![OpenArena benchmark — following a bot through combat](assets/openarena-frag.png)
+![OpenArena, following a bot through the carnage](assets/openarena-frag.png)
 
 ---
 
-## The machine
+## The patient
 
-- **Jumper EZbook**, Intel **Celeron N3450** (Apollo Lake, Goldmont, 4 cores,
+- **Jumper EZbook**, Intel **Celeron N3450** (Apollo Lake / Goldmont, 4 cores,
   6 W TDP), 6 GB RAM, Intel HD Graphics 500.
-- AMI Aptio UEFI. We already had (from prior sessions) the ability to read/write
-  the SPI flash and the AMI `Setup` NVAR variable directly from Linux — see the
-  sibling notes on NVAR/SPI tweaking. That earlier work taught us one important
-  lesson that turned out to be a recurring theme here:
-  **many settings exposed in the BIOS are dead — present in AMI's IFR template
-  but never plumbed into the FSP/PCODE by Jumper.** (We proved this for the DVMT
-  graphics-memory setting: changing it does nothing.)
-- **Base/turbo:** base 1.1 GHz, all-core burst capped at 2.1 GHz, 1-core 2.2 GHz
-  (`MSR 0x1AD = 0x15151516`). **TjMax = 105 °C** (`MSR 0x1A2 = 0x690000`).
+- AMI Aptio UEFI. From earlier adventures I already knew how to read and write the
+  SPI flash and the AMI `Setup` NVAR variable straight from Linux. That earlier
+  work also taught me a brutal lesson that haunts this whole tale: **a lot of the
+  knobs the BIOS proudly exposes are dead.** They sit in AMI's template, the menu
+  shows them, you change them, you feel powerful — and the firmware never wires
+  them to anything. (I learned this the hard way with the DVMT graphics-memory
+  setting, which does precisely nothing.) Remember that. It comes back.
+- **Clocks:** base 1.1 GHz, all-core burst capped at 2.1 GHz, single-core 2.2 GHz
+  (`MSR 0x1AD = 0x15151516`). **TjMax = 105 °C** (`MSR 0x1A2 = 0x690000`) — a
+  detail that will matter, because it means the 6 W cap is a *choice*, not a
+  thermal necessity.
 
-## The goal
-
-Raise the **sustained** power budget above 6 W so the CPU stops dropping to
-~1.5 GHz under prolonged all-core load.
+The itch: make the thing hold its turbo under load instead of crawling at 1.5 GHz.
 
 ---
 
-## The investigation (in order, dead ends included)
+## The investigation, dead ends and all
 
-### Act 1 — The obvious lever: RAPL MSR `0x610`. Wrong.
+### Act 1 — The obvious lever. Wrong, of course.
 
-Intel's documented package power limit is `MSR_PKG_POWER_LIMIT` (`0x610`). We
-decoded the factory value:
+Intel documents a package power limit MSR, `MSR_PKG_POWER_LIMIT` (`0x610`). I
+decoded the factory value like a good citizen:
 
 ```
 0x610 = 0x00008f0000dd8600
   PL1 (sustained) = 0x600 * (1/256 W) = 6.00 W, enabled
   PL2 (burst)     = 0xF00 * (1/256 W) = 15.00 W, enabled
-  lock bit63      = 0   (NOT locked -> we can write it)
+  lock bit63      = 0   (not locked -> I can write it!)
 ```
 
-Power unit confirmed from `MSR 0x606 = 0x...08` → `1/256 W`. The kernel's
-`powercap` sysfs agreed (`constraint_0_power_limit_uw = 5999616`). We wrote
-PL1 = 10 W:
+Power unit confirmed via `MSR 0x606` (1/256 W), the kernel's `powercap` sysfs
+agreed, the lock bit was clear. Easy. I wrote PL1 = 10 W:
 
 ```
-0x610 := 0x00008f0000dd8a00   # PL1 raw 0xA00 = 10 W
+0x610 := 0x00008f0000dd8a00   # PL1 = 0xA00 = 10 W
 ```
 
-It **read back fine**, powercap showed 10 W… and under a 45 s load the package
-still sat at **5.97 W**, cores at 1.5 GHz, with `THERM_STATUS` (`0x19C`) showing
-the active power-limit log bit. **PCODE overrides the MSR.** First dead end.
+It read back perfectly. `powercap` cheerfully reported 10 W. I started a load,
+rubbed my hands… and the package sat at **5.97 W**, cores at 1.5 GHz, with the
+power-limit throttle flag (`THERM_STATUS`, `0x19C`) lit up like a Christmas tree.
+The MSR was *obeyed by everyone except the hardware*. PCODE was overriding me.
+First wall. 🧱
 
-### Act 2 — MMIO mirror at the Core offset `0x59A0`. Dead end (wrong offset).
+### Act 2 — The MMIO mirror. Right idea, wrong address.
 
-On Core CPUs the package limit is mirrored in MMIO at `MCHBAR + 0x59A0`, and the
-hardware enforces the *lower* of MSR vs MMIO — the trick ThrottleStop/XTU use.
-We found MCHBAR from PCI `0:0.0` offset `0x48` = `0xFED10001` → base
-**`0xFED10000`**, and read `0xFED159A0`:
+On Core CPUs the limit is mirrored in MMIO at `MCHBAR + 0x59A0`, and the silicon
+enforces the *lower* of MSR-vs-MMIO. This is the trick ThrottleStop and XTU use. I
+found MCHBAR at PCI `0:0.0` offset `0x48` → base **`0xFED10000`**, and read
+`0xFED159A0`:
 
 ```
 MMIO @0xFED159A0 = 0x0000000000000000
 ```
 
-All zeros. We *wrongly* concluded "no MMIO mirror exists." (It does — just not at
-the Core offset. See Act 7. This was the mistake that led to a wrong conclusion.)
+Nothing. Zeros. "Ah," I said, with all the confidence of a man about to be wrong,
+"there is no MMIO mirror on this chip." Hold that thought.
 
-### Act 3 — Config-TDP MSRs. Dead end (unimplemented).
+### Act 3 — Config-TDP. The chip just laughs.
 
 ```
 0x648 CONFIG_TDP_NOMINAL : #GP
@@ -120,201 +116,194 @@ the Core offset. See Act 7. This was the mistake that led to a wrong conclusion.
 0x64B CONFIG_TDP_CONTROL : #GP
 ```
 
-Apollo Lake simply doesn't implement config-TDP. Dead end.
+Every config-TDP MSR throws a general-protection fault. Apollo Lake simply doesn't
+implement the feature. Next.
 
-### Act 4 — VR current limit. Not the limiter.
+### Act 4 — The voltage regulator. Innocent.
 
-`MSR 0x601 = 0xa8` ≈ 21 A — far above anything 6 W would need. Not it.
+`MSR 0x601 = 0xa8` ≈ 21 A current limit — comically far above anything 6 W needs.
+Not the culprit.
 
-### Act 5 — The BIOS "Turbo-XE TDP Limit" NVAR. Dead end (the reboot test).
+### Act 5 — The BIOS knob that smells like a trap.
 
-The extracted IFR (AMI setup form) had a promising numeric:
-
-```
-"TDP Limit"  Help: "Turbo-XE Mode Processor TDP Limit in Watts. 0 means using
-             the factory-configured value."   QuestionId 0x69, VarOffset 0xEC
-"TDC Limit"  (amps)                            QuestionId 0x68, VarOffset 0xE9
-```
-
-So we set NVAR offset `0xEC = 0x0A` (10 W) in **both** redundant Setup stores,
-with EIST and Turbo Mode both enabled, and **rebooted to test**. Result after
-reboot: still **5.97 W**. No effect. The field is gated behind
-`SuppressIf QID 0x352==0` (a "Turbo-XE supported" flag that is 0 on this locked
-SKU), so the firmware never feeds `0xEC` to the PUNIT. **Same dead-knob pattern
-as DVMT.** Dead end.
-
-### Act 6 — The premature WRONG conclusion.
-
-At this point we wrote it up as *"the 6 W limit is PCODE-locked and cannot be
-raised by any lever"* and even saved that to memory. **This was wrong.** It was
-based on the Act-2 single-offset MMIO read that returned zeros.
-
-### Act 7 — The pushback, and doing the MMIO check properly.
-
-Prompted by healthy skepticism ("I was quite sure we could do that"), we
-re-opened the weakest link: the MMIO read. A *clean* all-zero read is suspicious —
-real registers rarely read as pure zero. Two checks:
-
-1. **`CONFIG_STRICT_DEVMEM=y`** in the kernel — but on x86 this still allows
-   `mmap` of non-RAM MMIO holes (it fails outright with EPERM if denied; ours
-   succeeded). So the read path was legitimate.
-2. **Is MCHBAR even live?** We scanned the whole 32 KB MCHBAR window
-   (`scripts/mchscan.py`): **764 non-zero dwords**, real data starting at
-   `+0x1000`. The window is live. We then searched it for the RAPL-limit
-   signature (PL2 word `0x8F00`, the `dd86` pattern):
+Digging through the extracted IFR (the AMI setup form), I found this beauty:
 
 ```
-+0x70A8 = 0x00008F0000DD8600   PL1=6.00W PL2=15.00W   <-- FOUND IT
+"TDP Limit"  Help: "Turbo-XE Mode Processor TDP Limit in Watts.
+             0 means using the factory-configured value."   VarOffset 0xEC
 ```
 
-**The MMIO package-limit register on Apollo Lake is at `MCHBAR + 0x70A8`, not the
-Core `0x59A0`.** It held the *factory* 6 W value, untouched by our MSR write — and
-it is what the hardware actually enforces.
+A power limit, in watts, right there in the BIOS variable store! I set NVAR offset
+`0xEC = 0x0A` (10 W) in both redundant Setup stores, EIST and Turbo enabled, and
+**rebooted to test**, heart full of hope.
 
-### Act 8 — It works.
+Result: **5.97 W**. Nothing. The field is gated behind `SuppressIf QID 0x352==0` —
+a "Turbo-XE supported" flag that is `0` on this locked SKU — so the firmware never
+feeds `0xEC` to the PUnit. The exact same dead-knob trap as DVMT. I should have
+seen it coming. 😏
+
+### Act 6 — In which I confidently surrender
+
+So I wrote it up: *the 6 W limit is PCODE-locked, unreachable by any lever.* I even
+committed that verdict to memory. Defeat, signed and dated.
+
+It was, of course, completely wrong — and the only reason I reopened the case is
+that someone refused to believe it. "I was quite sure we could do that," they said.
+Annoyingly, that is exactly the kind of sentence that turns out to be right.
+
+### Act 7 — Reopening the one read I never trusted
+
+The weakest link was Act 2. A register that reads as *clean zeros* is suspicious —
+real MMIO almost never does that. Two questions:
+
+1. Is `/dev/mem` even letting me read MCHBAR? `CONFIG_STRICT_DEVMEM=y`, but on x86
+   that still allows mmap of non-RAM holes (it would fail loudly with EPERM
+   otherwise). The read path was legit.
+2. Is MCHBAR actually *live*? I scanned the whole 32 KB window
+   (`scripts/mchscan.py`): **764 non-zero dwords**, real data everywhere. Very
+   much alive. Then I searched it for the RAPL signature (the PL2 word `0x8F00`):
+
+```
++0x70A8 = 0x00008F0000DD8600   PL1=6.00W PL2=15.00W   <-- THERE IT IS
+```
+
+**The MMIO package-limit register on Apollo Lake lives at `0x70A8`, not the Core
+`0x59A0`.** I had been reading an empty parking space three buildings over. It held
+the factory 6 W, untouched by my Act-1 MSR write — and *this* was the one the
+hardware actually obeys.
+
+### Act 8 — Et voilà
 
 ```
 0xFED170A8 := 0x00008F0000DD8A00   # PL1 = 10 W
 ```
 
-| Metric            | Before (6 W) | After (10 W) |
-|-------------------|--------------|--------------|
-| Steady-state power| 5.97 W       | **10.12 W**  |
-| All-core clock    | ~1.5 GHz     | **2.09 GHz** |
-| Package temp      | 62 °C        | 76 °C        |
+| Metric | Before (6 W) | After (10 W) |
+|--------|-------------:|-------------:|
+| Steady-state power | 5.97 W | **10.12 W** |
+| All-core clock | ~1.5 GHz | **2.09 GHz** |
+| Package temp | 62 °C | 76 °C |
 
-2.09 GHz is the **all-core ratio ceiling** (21×), so **10 W is the sweet spot** —
-going higher (we tried 15 W) adds nothing for all-core CPU, because the limit
-becomes frequency (ratio) rather than power.
+2.09 GHz is the all-core ratio ceiling, so for pure CPU this is as good as it gets.
+I was a hero. For about ten minutes.
 
-### Act 9 — "Will raising it more help the GPU?" — methodology error first.
+### Act 9 — "And does it help the GPU?" — a self-inflicted wound
 
-First combined CPU+GPU test gave nonsense (10 W phase drew 14.9 W, 15 W phase
-drew 9.9 W). **Bug:** we sampled 8–18 s into the load, which is *inside* the
-~28 s PL2 burst window, so both phases were governed by PL2 = 15 W, not PL1.
-Lesson: to measure PL1 you must sample **after** the PL1 time window elapses
-(>35 s in), exactly like the CPU test.
+First combined CPU+GPU test produced glorious nonsense: the "10 W" run drew 14.9 W,
+the "15 W" run drew 9.9 W. Lower limit, higher power? Witchcraft?
 
-### Act 10 — The GPU clamp, and why no register fixes it.
+No — sampling error. I measured 8–18 s into the load, smack inside the ~28 s **PL2
+burst window**, where *both* runs are governed by the 15 W short-term limit, not
+PL1. Measure PL1 and you must wait out the burst (>35 s). Embarrassing, fixed,
+moving on.
 
-With a correct steady-state combined test (4 CPU workers + fullscreen glxgears):
+### Act 10 — The GPU latch reveals itself
+
+With an honest steady-state test (4 CPU workers + fullscreen glxgears):
 
 ```
 [PL1=10W] pkg=5.99 W  GPU=200 MHz  CPU=1195 MHz
 [PL1=15W] pkg=5.99 W  GPU=200 MHz  CPU=1195 MHz
 ```
 
-Both pinned at **6 W** with the CPU forced to ~1.2 GHz — even though the package
-limit register still read 10 W and i915 was **not** overwriting it (verified by
-reading `0x70A8` before/during/after a GPU load — it stayed 10 W). So a *separate*
-limit engages when the GT is active. We hunted it:
+Both pinned at **6 W**, CPU strangled back to 1.2 GHz — even though my `0x70A8`
+still read 10 W, and i915 was *not* secretly rewriting it (I checked before,
+during and after). The moment the GPU does anything, *something else* slams the
+package back to the SoC TDP. I went hunting and found suspicious read-only
+registers (`0x7870` ≈ 6 W, `0x70A0` = TDP 6 W), no writable per-plane MSRs
+(`0x638`/`0x640` both `#GP`)… and concluded the GPU ceiling was baked into PCODE,
+untouchable.
 
-- **`+0x7870`** holds a RAPL-format value **PL1 ≈ 6.01 W, enabled** — the likely
-  GT-active ceiling. **But it is read-only** (writes don't stick).
-- **`+0x70A0`** holds the SoC **TDP = 6 W** (PKG_POWER_INFO). Also **read-only**.
-- **Per-plane limit MSRs** PP0/IA `0x638` and PP1/GT `0x640`: **`#GP`** (don't
-  exist). Only their energy *counters* (`0x639`, `0x641`) exist.
-
-So when the GPU is active, the enforced package budget = the SoC TDP (6 W), which
-is held only in **read-only** registers, configured by PCODE/FSP at boot. No
-runtime lever raises it.
-
-### Act 11 — The "latch", and what it means for Chrome.
+### Act 11 — The latch, and why your browser ruins everything
 
 A per-second trace under pure CPU load (`data/timeseries-cpu-load.txt`) shows the
-mechanism precisely:
+mechanism with cruel clarity:
 
 ```
  t  GPUmhz  CPUmhz  pkgW
- 1-9   100   2089   ~10.0   GPU idle (RC6) -> 10 W, full turbo
-10    300   1392    6.65    GPU wakes -> package collapses
-16-30 ~100  ~1450   ~6.0    GPU idle again, but power STAYS at 6 W (sticky)
+ 1-9   100   2089   ~10.0   GPU asleep (RC6) -> full 10 W, full turbo
+10    300   1392    6.65    GPU twitches -> package collapses
+16-30 ~100  ~1450   ~6.0    GPU asleep again... but power STAYS at 6 W
 ```
 
-The package runs at 10 W **only while the GPU sits in deep idle (RC6)**. The
-instant the GPU does *any* work it drops to 6 W, and it does **not** recover even
-when the GPU goes back to 100 MHz moments later. Because Chrome (and any
-compositing desktop under real use) keeps waking the GPU, **interactive/browser
-use mostly stays at 6 W.** The 10 W win is real for **CPU-bound work with the GPU
-genuinely idle**: compiling, video *encoding* (not decoding), compression, batch
-processing — ideally on a static screen or over SSH/console.
+10 W holds **only while the GPU is in deep sleep**. The instant it wakes — to
+composite a window, scroll a page, blink a cursor — the package drops to 6 W and
+*stays there*, sulking, even after the GPU dozes off again. So Chrome, which keeps
+the iGPU permanently caffeinated, would keep me at 6 W forever. The CPU win was
+real only for headless, screen-idle grinding: compiling, encoding, compression.
 
-> *(At this point we again concluded the GPU case was unfixable at runtime. As in
-> Act 6, that conclusion was premature — see Act 12.)*
+And so, for the second time, I closed the case as unwinnable. Spoiler: the case
+was not unwinnable.
 
-### Act 12 — The breakthrough: `min(MMIO, MSR)` and the MSR lock bit.
+### Act 12 — The breakthrough hiding in coreboot
 
-Pushed to look harder, we read the **coreboot Apollo Lake** source. Its commit
-"Update PL1 value in RAPL MMIO register" states it exactly:
+Pushed (again) to look harder, I went and read the **coreboot** Apollo Lake source,
+and there it was, stated outright in a commit message:
 
 > *"This RAPL MMIO register is a physically separate instance from RAPL MSR
-> register. The Punit algorithm constrains performance to whichever power limit
-> is **lower** between both registers."* — and *"FSP code sets the PL1 value as
-> 6 W in RAPL MMIO register based on fused soc tdp value."*
+> register. The Punit algorithm constrains performance to whichever power limit is
+> **lower** between both registers."* — and *"FSP code sets the PL1 value as 6 W in
+> RAPL MMIO register based on fused soc tdp value."*
 
-So enforcement is **`PL1 = min(MMIO @0x70A8, MSR 0x610)`**. That retro-explains
-everything. We then re-read the MSR during a GPU load — something we'd never done
-(we only ever re-checked the *MMIO*):
-
-```
-before load:  MSR 0x610 = 0x...8600   (6 W !!)   MMIO = 0x...8a00 (10 W)
-during  load: MSR 0x610 = 0x...8600   (6 W)      MMIO = 0x...8a00 (10 W)
-```
-
-**The MSR had been reset to 6 W.** The "GPU latch" from Act 11 was never a locked
-register — it was **PCODE resetting the MSR copy to 6 W on GT activity**, and
-`min(10 W MMIO, 6 W MSR) = 6 W`. Proof: continuously re-writing the MSR to 10 W
-each second during a combined load held the package at **~10 W**
-(`data/combined-load-locked-msr.txt`).
-
-The clean fix is the MSR **lock bit (63)**: write the MSR to 10 W *with* bit 63
-set, and PCODE can no longer reset it.
+`PL1 = min(MMIO, MSR)`. Two separate registers. I had spent Act 8 onward smugly
+holding the MMIO at 10 W… and never once re-checking the MSR. So I looked:
 
 ```
-MSR 0x610 := 0x80008f0000dd8a00     # PL1 10 W, PL2 15 W, LOCK
+during GPU load:  MSR 0x610 = 0x...8600  (6 W!)   MMIO = 0x...8a00 (10 W)
 ```
 
-Combined CPU+GPU load, **no daemon, no re-assert**:
+**The MSR had been reset to 6 W.** The famous "GPU latch" was never some locked
+fortress register — it was PCODE quietly resetting the *MSR* copy to 6 W whenever
+the GPU stirs, and `min(10, 6) = 6`. The fortress was a sticky note.
+
+Proof: re-writing the MSR to 10 W every second during a combined load held the
+package at ~10 W. But the *elegant* fix is the MSR's own **lock bit (63)** — write
+10 W with bit 63 set and PCODE can no longer touch it:
 
 ```
-MSR readback during load : 0x80008f0000dd8a00   (held)
-steady-state package      : 9.98 W   (was 5.99 W)
-GPU                       : ~383 MHz (active)
-CPU                       : ~1.57 GHz
+MSR 0x610 := 0x80008f0000dd8a00   # PL1 10 W, PL2 15 W, LOCKED
 ```
 
-**The unlock now applies in every workload, GPU included.** The persistent
-solution writes both registers at boot (MMIO unlocked 10 W, which holds on its
-own; MSR locked 10 W).
+Combined CPU+GPU load, no daemon, no babysitting:
+
+```
+MSR during load : 0x80008f0000dd8a00  (held!)
+package         : 9.98 W   (was 5.99)
+GPU             : ~383 MHz (wide awake)
+CPU             : ~1.57 GHz
+```
+
+`min(10 locked, 10) = 10`, GPU or no GPU. **Bonheur.** The unlock now applies to
+games, video, browsing — everything. Two registers, one lock bit, and a great deal
+of humility.
 
 ---
 
-## Final verdict
+## The verdict
 
-The PUnit enforces `PL1 = min(MMIO @0x70A8, MSR 0x610)`, so **both** must be raised.
+Enforcement is `PL1 = min(MMIO @0x70A8, MSR 0x610)`, so **both** must be raised —
+and the MSR must be locked or the GPU resets it.
 
 | Lever | Writable? | Role | Verdict |
 |---|---|---|---|
 | **MMIO `0x70A8` (package limit)** | **yes** | one half of the `min()` | **REQUIRED — raise to 10 W** |
-| **MSR `0x610` PL1 + LOCK (bit63)** | **yes** | other half; PCODE resets it to 6 W on GT activity unless locked | **REQUIRED — raise to 10 W, locked** |
-| MMIO `0x59A0` (Core offset) | n/a | — | wrong offset on Goldmont (dead end) |
-| MMIO `0x7870` / `0x70A0` (read-outs we mis-read as the GT limit) | no | status/TDP read-outs | red herring — the GT-active 6 W came from the MSR reset, not these |
-| config-TDP `0x648-0x64C` | — | — | `#GP`, unimplemented |
+| **MSR `0x610` PL1 + LOCK (bit 63)** | **yes** | other half; PCODE resets it on GT activity unless locked | **REQUIRED — raise to 10 W, locked** |
+| MMIO `0x59A0` (Core offset) | n/a | — | wrong offset on Goldmont — the great red herring |
+| MMIO `0x7870` / `0x70A0` | no | TDP/status read-outs | look like the GT limit, aren't — the 6 W came from the MSR reset |
+| config-TDP `0x648–0x64C` | — | — | `#GP`, unimplemented |
 | PP0/PP1 limit MSRs `0x638/0x640` | — | — | `#GP`, don't exist |
-| BIOS NVAR "TDP Limit" `0xEC` | yes (flash) | — | not plumbed (dead knob) |
-
-**Both registers raised + MSR locked ⇒ 10 W in every workload (CPU-only and GPU/mixed).**
+| BIOS NVAR "TDP Limit" `0xEC` | yes (flash) | — | not plumbed — a dead knob |
 
 ## Register map (MCHBAR base `0xFED10000`)
 
 | Offset | Meaning | Notes |
 |--------|---------|-------|
-| `+0x70A0` | PKG_POWER_INFO (TDP) | 6 W, read-only (read-out, not a lever) |
+| `+0x70A0` | PKG_POWER_INFO (TDP) | 6 W, read-only read-out |
 | `+0x70A8` | **PACKAGE_RAPL_LIMIT (MMIO)** | writable; `0x00008f0000dd8a00` = PL1 10 W / PL2 15 W |
-| `+0x7870` | RAPL-shaped read-out (~6 W) | read-only; a red herring, not the GT limit |
+| `+0x7870` | RAPL-shaped read-out (~6 W) | read-only red herring |
 
-Plus MSR `0x610` (`PKG_POWER_LIMIT`): same qword layout, must be written with
-**bit 63 (lock)** set so PCODE can't reset it on GT activity.
+Plus MSR `0x610` (`PKG_POWER_LIMIT`): same qword layout, written with **bit 63
+(lock)** set so PCODE can't reset it on GPU activity.
 
 RAPL limit qword layout: bits `[14:0]` PL1 power (× 1/256 W), bit `15` PL1 enable,
 bit `16` clamp, bits `[23:17]` time window, bits `[46:32]` PL2, bit `47` PL2
@@ -322,19 +311,19 @@ enable, bit `63` lock.
 
 ---
 
-## Usage
+## Doing it yourself
 
-Everything needs root (reads/writes `/dev/mem` and MSRs).
+Everything here needs root (it pokes `/dev/mem` and MSRs).
 
 ```bash
-# apply the full fix now (both registers; volatile, lost on reboot)
+# apply the full fix now (both registers; volatile, gone on reboot)
 sudo ./scripts/ezbook-pl1.py
 #   -> MMIO 0x70A8 = 10 W  AND  MSR 0x610 = 10 W + lock
 
-# show current MMIO package limit
+# just look at the current MMIO limit
 sudo ./scripts/mmio_rapl.py
 
-# set only the MMIO half (CPU-only boost; GPU loads will still latch to 6 W)
+# set only the MMIO half (CPU-only boost; GPU loads still latch to 6 W)
 sudo ./scripts/mmio_rapl.py 0x00008f0000dd8a00
 
 # re-find the register on a different board / firmware
@@ -345,7 +334,7 @@ sudo ./scripts/genpoke.py 70a8                 # read
 sudo ./scripts/genpoke.py 70a8 0x...           # write
 ```
 
-### Make it persistent (systemd)
+### Make it stick (systemd)
 
 ```bash
 sudo install -m 0755 scripts/ezbook-pl1.py /usr/local/sbin/ezbook-pl1.py
@@ -354,64 +343,60 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ezbook-power-limit.service
 ```
 
-`ezbook-pl1.py` is self-contained (no deps) and re-applies the full fix (MMIO
-10 W + MSR 10 W locked) on every boot. Confirm with
+Both registers are volatile and the lock clears on reboot, so a tiny oneshot unit
+re-applies the fix every boot. `ezbook-pl1.py` has no dependencies; confirm with
 `systemctl status ezbook-power-limit.service`.
 
 ---
 
-## The GPU case — SOLVED
+## What the 10 W actually buys you
 
-Earlier drafts of this README said the GPU→6 W fallback was unfixable at runtime.
-**That was wrong** (Act 12). It is fixed: locking the MSR (`0x610` with bit 63)
-stops PCODE from resetting it on GT activity, so `min(MMIO, MSR)` stays at 10 W
-with the GPU active. `ezbook-pl1.py` / the systemd unit do this for you, and the
-boost now applies to Chrome, video, games and any mixed CPU+GPU load.
+It raises the **shared** package budget. Under a combined load the CPU and GPU now
+split 10 W (e.g. CPU ~1.57 GHz + GPU ~383 MHz) instead of jointly suffocating at
+6 W. It does **not** lift the per-domain ceilings — all-core CPU is still ratio-
+capped at 2.1 GHz, the GPU at 700 MHz — but nothing is starved any more.
 
-Note this raises the *shared* package budget to 10 W; under a combined load the
-CPU and GPU split that 10 W (e.g. CPU ~1.57 GHz + GPU ~383 MHz instead of being
-strangled at 6 W). It does **not** raise the per-domain ceilings: all-core CPU is
-still capped at the 2.1 GHz ratio, and the GPU at 700 MHz — but neither is
-power-starved any more.
+### Why not crank it to 15 W?
 
-### Why not push *past* 10 W?
-
-We measured it (see [BENCHMARKS.md](BENCHMARKS.md), phase-2): **12 W and 15 W buy
-essentially nothing and 15 W can hurt.** CPU-only is flat (ratio-capped), glmark2
-gains only +7% at 12 W then plateaus, OpenArena is maxed at 10 W, and at 15 W the
-uncapped GPU starves the CPU in mixed loads — all while running hotter (87 °C).
-10 W captures the usable benefit at the lowest temps, so that's the daily setting.
-If you still want to experiment, raise the target in `ezbook-pl1.py` (PL1 = 12 W is
-raw `0xC00` → MMIO `0x00008f0000dd8c00`, MSR `0x80008f0000dd8c00`).
+Because I tried, and measured it (the full sweep is in
+[BENCHMARKS.md](BENCHMARKS.md)). Past 10 W the returns evaporate: CPU is flat
+(ratio-capped), glmark2 gains a measly +7 % at 12 W then plateaus, the game is
+already maxed at 10 W — and at **15 W it actively backfires on mixed loads**: with
+a bigger budget and no per-domain limit, the uncapped GPU gorges itself and starves
+the CPU encode down to *worse-than-10 W* numbers, all while running hottest (87 °C).
+More watts, less work, more heat. 10 W is the honest optimum, which is why the
+daily config stops there. If you insist on experimenting, the target in
+`ezbook-pl1.py` is one constant away (PL1 = 12 W → MMIO `0x00008f0000dd8c00`, MSR
+`0x80008f0000dd8c00`).
 
 ---
 
-## Tools in this repo (`scripts/`)
+## The toolbox (`scripts/`)
 
-| Script | Purpose |
-|--------|---------|
+| Script | What it does |
+|--------|--------------|
 | `mmio_rapl.py` | show / write the MMIO package RAPL limit at `0x70A8` |
 | `mchscan.py` | scan 32 KB MCHBAR for liveness + the RAPL signature (re-find the register) |
-| `dumpregs.py` | dump the register region around `0x70A8` and scan for limit-shaped qwords |
+| `dumpregs.py` | dump the region around `0x70A8` and hunt limit-shaped qwords |
 | `genpoke.py` | generic MCHBAR qword peek/poke by offset |
-| `nvar.py` | read/write the AMI `Setup` NVAR variable in SPI flash (from prior work) |
+| `nvar.py` | read/write the AMI `Setup` NVAR variable in SPI flash |
 | `peek.py` | print selected NVAR Setup offsets (EIST/Turbo/TDC/TDP) |
-| `gputest.sh` | steady-state combined CPU+GPU load benchmark (samples after PL2 window) |
-| `snapdiff.py` | snapshot/diff MCHBAR idle vs GPU-active (used to chase the GT-active clamp) |
-| `ezbook-pl1.py` | self-contained boot-time applier: MMIO 10 W + MSR 10 W locked (used by the systemd unit) |
+| `benchsuite.sh` / `runladder.sh` / `runladder2.sh` | the benchmark harness and the 6→15 W ladders |
+| `reassert_msr.py` | re-assert an unlocked MSR (for the >10 W sweep) |
+| `plot_benchmarks.py` | regenerate the plots from the raw data |
+| `ezbook-pl1.py` | the boot-time applier: MMIO 10 W + MSR 10 W locked |
 
-## Safety notes
+## Before you go poking
 
-- All runtime writes here are **volatile** — a reboot restores the factory 6 W.
-  The MSR lock bit (bit 63) also clears on reboot, so the systemd unit re-applies
-  it every boot. Nothing here modifies flash except `nvar.py` (and we established
-  the NVAR power knob does nothing anyway).
-- TjMax is 105 °C and we measured ≤76 °C at 10 W sustained, so thermals are not a
-  concern at this limit on this chassis. If you push a hotter chip/chassis, watch
-  `THERM_STATUS` (`MSR 0x19C`) and the thermal zones.
-- `/dev/mem` MMIO pokes are inherently sharp tools. Writing the wrong MCHBAR
-  offset can hang the box. The offsets here are specific to **Apollo Lake
-  (N3450)**; re-run `mchscan.py` before trusting them on any other silicon.
+- Everything runtime is **volatile** — a reboot restores the factory 6 W, lock and
+  all. The only thing that touches flash is `nvar.py`, and we already established
+  the NVAR power knob is a dud.
+- TjMax is 105 °C; I measured ≤ 84 °C even at 15 W. Thermals were never the limit
+  on this chassis — but if yours is hotter, watch `THERM_STATUS` (`MSR 0x19C`) and
+  the thermal zones.
+- `/dev/mem` pokes are a loaded gun. The wrong MCHBAR offset can hang the machine
+  instantly. Every address here is specific to **Apollo Lake (N3450)** — run
+  `mchscan.py` before trusting any of it on different silicon.
 
-*Written as a complete lab notebook, dead ends and all, so the next person (or the
-next me) doesn't re-walk the wrong paths.*
+Three buildings over, an empty parking space still reads `0x0000000000000000`.
+Don't trust the first clean zero you meet. 🙂
