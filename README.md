@@ -1,5 +1,12 @@
 # Squeezing 10 watts out of a 6-watt netbook (Celeron N3450 / Apollo Lake)
 
+> **This repo is the public write-up.** The runnable scripts, systemd unit, and raw benchmark data
+> that used to live alongside it now have their maintained master copy in the private `home-infra`
+> monorepo, at `hosts/ezbook/tuning/` (full pre-move history: `git log import/jumper-ezbook-power-unlock`
+> after cloning it). Paths like `scripts/...` and `systemd/...` referenced below are relative to that
+> copy, not this one — this repo keeps the article and the numbers (`BENCHMARKS.md`, `assets/`) as read
+> here, for anyone who finds it from a search engine or a link.
+
 I own a Jumper EZbook. It cost about as much as a fancy dinner, it has a Celeron
 N3450, 6 GB of RAM, and the ambition of a tired snail. Under any sustained load
 its four cores sag down to ~1.5 GHz and stay there, because Intel decided this
